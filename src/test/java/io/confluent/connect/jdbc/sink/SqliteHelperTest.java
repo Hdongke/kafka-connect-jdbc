@@ -81,6 +81,7 @@ public class SqliteHelperTest {
     for (TableId tableId : dialect.tableIds(sqliteHelper.connection)) {
       tables.put(tableId.tableName(), dialect.describeTable(sqliteHelper.connection, tableId));
     }
+    dialect.close();
 
     assertEquals(tables.size(), 3);
     assertTrue(tables.containsKey("employees"));

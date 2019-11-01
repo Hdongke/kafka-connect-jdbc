@@ -15,7 +15,10 @@
 
 package io.confluent.connect.jdbc.sink;
 
+import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
@@ -76,8 +79,75 @@ public class BufferedRecords {
     this.connection = connection;
   }
 
-  public List<SinkRecord> add(SinkRecord record) throws SQLException {
+  //Transform the value-schema and expand the nested STRUCT structure 
+  //on the top layer, for example:
+  //Before:
+  // Schema {t_avro_envelope:STRUCT}
+  //    |
+  //    +--Field {name=updated, schema=STRING}
+  //    +--Field {name=after, schema={t_avro:STRUCT}}
+  //                              |
+  //                              +--Field {name=id, schema=INT64}
+  //                              +--Field {name=ts, schema=INT64}
+  //                              +--Field {name=age, schema=INT64}
+  //                              +--Field {name=name, schema=STRING}
+  //After:                      
+  // Schema {t_avro_envelope:STRUCT}
+  //    |
+  //    +--Field {name=updated, schema=STRING}
+  //    +--Field {name=id, schema=INT64}
+  //    +--Field {name=ts, schema=INT64}
+  //    +--Field {name=age, schema=INT64}
+  //    +--Field {name=name, schema=STRING}    
+  SinkRecord valueSchemaExpand(SinkRecord record) {
+    // This record is not sent by DRDB
+    Schema orgiValueSchema = record.valueSchema();
+    if(isNull(orgiValueSchema)){
+      return record;
+    }
+
+    Field updatedField = orgiValueSchema.field("updated");
+    Field afterField = orgiValueSchema.field("after");
+    if (isNull(updatedField) || isNull(afterField)) {
+      return record;
+    }
+
+    SchemaBuilder schemaBuilder = SchemaBuilder.struct();
+    //schemaBuilder.field(updatedField.name(), updatedField.schema());
+    for (Field field : afterField.schema().fields()) {
+      schemaBuilder.field(field.name(), field.schema());
+    }
+    final Schema valueSchema = schemaBuilder.build();
+
+    Struct valueStruct = (Struct) record.value();
+    if (isNull(valueStruct)) {
+      return record;
+    }
+
+    Struct afterValueStruct = (Struct)valueStruct.get(afterField);
+    if (isNull(afterValueStruct)) {
+      //delete record
+      return record.newRecord(record.topic(), record.kafkaPartition(), 
+                              record.keySchema() , record.key(), 
+                              null,null, 
+                              record.timestamp(), record.headers());
+    } else {
+      Struct value = new Struct(valueSchema);
+      //value.put(updatedField.name(), valueStruct.get(updatedField));
+      for (Field field : afterField.schema().fields()) {
+        value.put(field.name(), afterValueStruct.get(field));
+      }
+      //upsert record
+      return record.newRecord(record.topic(), record.kafkaPartition(), 
+                              record.keySchema() , record.key(), 
+                              valueSchema, value, 
+                              record.timestamp(), record.headers());
+    }
+  }
+
+  public List<SinkRecord> add(SinkRecord origRecord) throws SQLException {
     final List<SinkRecord> flushed = new ArrayList<>();
+    SinkRecord record = valueSchemaExpand(origRecord);
 
     boolean schemaChanged = false;
     if (!Objects.equals(keySchema, record.keySchema())) {

@@ -38,7 +38,9 @@ import java.util.Random;
 
 import io.confluent.connect.jdbc.dialect.DatabaseDialect;
 import io.confluent.connect.jdbc.dialect.DatabaseDialects;
+import io.confluent.connect.jdbc.dialect.GreenplumDatabaseDialect;
 import io.confluent.connect.jdbc.sink.metadata.FieldsMetadata;
+import io.confluent.connect.jdbc.util.CachedConnectionProvider;
 import io.confluent.connect.jdbc.util.TableId;
 
 import static org.junit.Assert.assertEquals;
@@ -58,6 +60,153 @@ public class BufferedRecordsTest {
   public void tearDown() throws IOException, SQLException {
     sqliteHelper.tearDown();
   }
+  
+ @Test
+  public void testSchemaExpend() throws SQLException{
+    final HashMap<Object, Object> props = new HashMap<>();
+    props.put("connection.url", sqliteHelper.sqliteUri());
+    props.put("auto.create", true);
+    props.put("auto.evolve", true);
+    props.put("batch.size", 1000); // sufficiently high to not cause flushes due to buffer being full
+    final JdbcSinkConfig config = new JdbcSinkConfig(props);
+
+    final String url = sqliteHelper.sqliteUri();
+    final DatabaseDialect dbDialect = DatabaseDialects.findBestFor(url, config);
+    final DbStructure dbStructure = new DbStructure(dbDialect);
+
+    final TableId tableId = new TableId(null, null, "dummy");
+    final BufferedRecords buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, sqliteHelper.connection);
+
+    final Schema schemaInner = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("ts", Schema.INT32_SCHEMA)
+        .field("age",Schema.INT32_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .build();
+
+    final Schema schemaA = SchemaBuilder.struct()
+        .field("updated", Schema.STRING_SCHEMA)
+        .field("after", schemaInner)
+        .build();
+
+    final Struct valueInner = new Struct(schemaInner)
+        .put("id", 1)
+        .put("ts", 100)
+        .put("age", 20)
+        .put("name", "nick");
+
+    final Struct valueA = new Struct(schemaA)
+        .put("updated", "123")
+        .put("after", valueInner);
+
+    final SinkRecord recordA = new SinkRecord("dummy", 0, null, null, schemaA, valueA, 0);
+    SinkRecord recordExpended = buffer.valueSchemaExpand(recordA);
+
+    final Schema schemaB = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("ts", Schema.INT32_SCHEMA)
+        .field("age", Schema.INT32_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .build();
+
+    final Struct valueB = new Struct(schemaB)
+        .put("id", 1)
+        .put("ts", 100)
+        .put("age", 20)
+        .put("name", "nick");
+
+    final SinkRecord recordB = new SinkRecord("dummy", 0, null, null, schemaB, valueB, 0);
+    assert(recordB.equals(recordExpended));
+
+    final SinkRecord recordC = buffer.valueSchemaExpand(recordB);
+    assert(recordC.equals(recordB));
+
+  }
+
+  @Test
+  public void testGPUpsertThenDelete() throws SQLException {
+    final HashMap<Object, Object> props = new HashMap<>();
+    props.put("connection.url", "jdbc:postgresql://localhost/postgres?user=postgres&password=postgres");
+    props.put("auto.create", false);
+    //props.put("auto.evolve", true);
+    props.put("batch.size", 1000); // sufficiently high to not cause flushes due to buffer being full
+    props.put("insert.mode", "upsert"); 
+    props.put("delete.enabled", true); 
+    props.put("pk.mode", "record_key"); 
+    props.put("pk.fields", "id"); 
+    final JdbcSinkConfig config = new JdbcSinkConfig(props);
+
+    //final String url ="jdbc:postgresql://localhost/postgres?user=postgres&password=postgres";
+    final DatabaseDialect dbDialect = new GreenplumDatabaseDialect(config);
+    final DbStructure dbStructure = new DbStructure(dbDialect);
+
+    final TableId tableId = new TableId(null, null, "t_avro");
+
+    final CachedConnectionProvider cachedConnectionProvider = new CachedConnectionProvider(dbDialect);
+    final Connection connection = cachedConnectionProvider.getConnection();
+    if (connection.getAutoCommit()){
+        connection.setAutoCommit(false);
+    }
+
+    final BufferedRecords buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, connection);
+
+    final Schema keySchema = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .build();
+
+    final Struct key = new Struct(keySchema)
+        .put("id", 1);
+
+    final Schema valueSchema = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("ts", Schema.INT32_SCHEMA)
+        .field("age", Schema.INT32_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .build();
+
+    final Struct value = new Struct(valueSchema)
+        .put("id", 1)
+        .put("ts", 1562868)
+        .put("age", 23)
+        .put("name", "Frank");
+
+    final SinkRecord record = new SinkRecord(tableId.tableName(), 0, keySchema, key, valueSchema, value, 0);
+    final SinkRecord recordDelete = new SinkRecord(tableId.tableName(), 0, keySchema, key, null, null, 2);
+
+    final Schema keySchemaB = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .build();
+
+    final Struct keyB = new Struct(keySchemaB)
+        .put("id", 2);
+
+    final Schema valueSchemaB = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("ts", Schema.INT32_SCHEMA)
+        .field("age", Schema.INT32_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .build();
+
+    final Struct valueB = new Struct(valueSchemaB)
+        .put("id", 2)
+        .put("ts", 100)
+        .put("age", 20)
+        .put("name", "nick");
+    final SinkRecord recordB = new SinkRecord(tableId.tableName(), 0, keySchemaB, keyB, valueSchemaB, valueB, 1);
+
+    try {
+        assertEquals(Collections.emptyList(), buffer.add(record));
+        assertEquals(Collections.emptyList(), buffer.add(recordB));
+        assertEquals(Collections.emptyList(), buffer.add(recordDelete));
+        assertEquals(Arrays.asList(record, recordB, recordDelete), buffer.flush());
+        //assertEquals(Arrays.asList(record, recordB), buffer.flush());
+    } catch (SQLException sqle) {
+        System.out.println(sqle.getMessage());
+    }
+        connection.commit();
+        cachedConnectionProvider.close();
+  }
+
 
   @Test
   public void correctBatching() throws SQLException {

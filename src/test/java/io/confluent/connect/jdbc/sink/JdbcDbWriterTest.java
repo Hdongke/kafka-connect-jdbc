@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 import io.confluent.connect.jdbc.dialect.DatabaseDialect;
+import io.confluent.connect.jdbc.dialect.GreenplumDatabaseDialect;
 import io.confluent.connect.jdbc.dialect.SqliteDatabaseDialect;
 import io.confluent.connect.jdbc.util.TableDefinition;
 import io.confluent.connect.jdbc.util.TableId;
@@ -250,6 +251,50 @@ public class JdbcDbWriterTest {
     );
   }
 
+   @Test
+  public void insertRecord() throws SQLException {
+    String topic = "t_avro";
+    int partition = 7;
+    long offset = 42;
+
+    final HashMap<String,String> props = new HashMap<>();
+    props.put("connection.url", "jdbc:postgresql://localhost/postgres?user=postgres&password=postgres");
+    props.put("auto.create", "false");
+    //props.put("auto.evolve", true);
+    //props.put("batch.size", 1000); // sufficiently high to not cause flushes due to buffer being full
+    props.put("insert.mode", "upsert"); 
+    props.put("delete.enabled", "true"); 
+    props.put("pk.mode", "record_key"); 
+    props.put("pk.fields", "id"); 
+
+    final JdbcSinkConfig config = new JdbcSinkConfig(props);
+    dialect = new GreenplumDatabaseDialect(config);
+    final DbStructure dbStructure = new DbStructure(dialect);
+    writer = new JdbcDbWriter(config, dialect, dbStructure);
+    final Schema keySchema = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .build();
+
+    final Struct key = new Struct(keySchema)
+        .put("id", 1);
+
+    final Schema valueSchema = SchemaBuilder.struct()
+        .field("id", Schema.INT32_SCHEMA)
+        .field("ts", Schema.INT32_SCHEMA)
+        .field("age", Schema.INT32_SCHEMA)
+        .field("name", Schema.STRING_SCHEMA)
+        .build();
+
+    final Struct value = new Struct(valueSchema)
+        .put("id", 1)
+        .put("ts", 1562868)
+        .put("age", 23)
+        .put("name", "Frank1");
+
+    final SinkRecord record = new SinkRecord(topic, partition, keySchema, key, valueSchema, value, offset);
+    writer.write(Collections.singletonList(record));
+  }
+  
   @Test
   public void insertDeleteSameRecord() throws SQLException {
     String topic = "books";

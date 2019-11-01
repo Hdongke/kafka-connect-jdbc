@@ -38,6 +38,7 @@ public class DatabaseDialectsTest {
     assertContainsInstanceOf(providers, OracleDatabaseDialect.Provider.class);
     assertContainsInstanceOf(providers, SqliteDatabaseDialect.Provider.class);
     assertContainsInstanceOf(providers, PostgreSqlDatabaseDialect.Provider.class);
+    assertContainsInstanceOf(providers, GreenplumDatabaseDialect.Provider.class);    
     assertContainsInstanceOf(providers, MySqlDatabaseDialect.Provider.class);
     assertContainsInstanceOf(providers, SqlServerDatabaseDialect.Provider.class);
     assertContainsInstanceOf(providers, SapHanaDatabaseDialect.Provider.class);
@@ -69,6 +70,11 @@ public class DatabaseDialectsTest {
   @Test
   public void shouldFindPostgreSqlDialect() {
     assertDialect(PostgreSqlDatabaseDialect.class, "jdbc:postgresql://localhost/test");
+  }
+
+  @Test
+  public void shouldFindGreenplumDialect() {
+    assertDialect(GreenplumDatabaseDialect.class, "jdbc:postgresql://localhost/test");
   }
 
   @Test
